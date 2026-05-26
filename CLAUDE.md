@@ -32,7 +32,7 @@ You work in **two repos cloned side-by-side**:
 
 ```
 ~/graph_model              ← this fork; check out branch `experiment/001-repro-family-tree`
-~/graph-reasoning-llm      ← research repo (runbook + experiment state, work on main)
+~/graph-reasoning-llm      ← research repo (runbook + experiment state, work on branch experiment-setup)
 ```
 
 - **At session start:** verify `git -C ~/graph_model branch --show-current` returns `experiment/001-repro-family-tree`. If not, `git checkout experiment/001-repro-family-tree`.
