@@ -73,7 +73,8 @@ from accelerate.utils import send_to_device
 
 #region Graph Llama Config
 class GraphAttnBiasConfig:
-    def __init__(self, spd=False, laplacian=False, max_spd=32, rwse=False, rrwp=False, max_rw_steps=8, magnetic=False, magnetic_dim=32, magnetic_q=0.25):
+    def __init__(self, spd=False, laplacian=False, max_spd=32, rwse=False, rrwp=False, max_rw_steps=8, magnetic=False, magnetic_dim=32, magnetic_q=0.25,
+                 col_header=False, header_clique=False, row_anchor_agg=False, row_anchor_spine=False):
         self.spd = spd
         self.laplacian = laplacian
         self.max_spd = max_spd
@@ -83,6 +84,11 @@ class GraphAttnBiasConfig:
         self.magnetic = magnetic
         self.magnetic_dim = magnetic_dim
         self.magnetic_q = 0.25
+        # exp 003 table-structural biases
+        self.col_header = col_header
+        self.header_clique = header_clique
+        self.row_anchor_agg = row_anchor_agg
+        self.row_anchor_spine = row_anchor_spine
 
     def to_dict(self):
         return {
@@ -94,7 +100,11 @@ class GraphAttnBiasConfig:
             "max_rw_steps": self.max_rw_steps,
             "magnetic": self.magnetic,
             "magnetic_dim": self.magnetic_dim,
-            "magnetic_q": self.magnetic_q
+            "magnetic_q": self.magnetic_q,
+            "col_header": self.col_header,
+            "header_clique": self.header_clique,
+            "row_anchor_agg": self.row_anchor_agg,
+            "row_anchor_spine": self.row_anchor_spine,
         }
 
     def __str__(self):
@@ -111,9 +121,13 @@ class GraphLlamaConfig(LlamaConfig):
         rwse=False, 
         rrwp=False,
         max_rw_steps=8,
-        graph_attn_bias=None, 
+        graph_attn_bias=None,
         magnetic=False,
         magnetic_dim=32,
+        col_header=False,
+        header_clique=False,
+        row_anchor_agg=False,
+        row_anchor_spine=False,
         **kwargs
     ):
         # 1. Initialize standard Llama parameters
@@ -134,7 +148,11 @@ class GraphLlamaConfig(LlamaConfig):
                 rrwp=rrwp,
                 max_rw_steps=max_rw_steps,
                 magnetic=magnetic,
-                magnetic_dim=magnetic_dim
+                magnetic_dim=magnetic_dim,
+                col_header=col_header,
+                header_clique=header_clique,
+                row_anchor_agg=row_anchor_agg,
+                row_anchor_spine=row_anchor_spine,
             )
 
     def to_dict(self):
