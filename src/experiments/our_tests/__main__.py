@@ -137,13 +137,17 @@ def training_run(
         gradient_checkpointing_kwargs={"use_reentrant": False} if gradient_checkpointing else None,
 
         # Evaluation arguments:
-        eval_strategy="steps",                                  # Evaluate every eval_steps during training
-        eval_steps=EVAL_EVERY,                                  # Number of steps between evaluations
-        save_strategy="steps",                                  # Save a checkpoint based on save_steps
-        save_steps=EVAL_EVERY,                                  # Number of steps between saving checkpoints
+        # [002 deviation] eval+save aligned to epoch boundaries so we retain
+        # one checkpoint per epoch for post-hoc trajectory analysis. eval_steps
+        # / save_steps are ignored under "epoch" strategy but kept here for
+        # easy flip-back. load_best_model_at_end still picks best-by-val-EM.
+        eval_strategy="epoch",                                  # [002] was "steps" — eval at end of each epoch
+        eval_steps=EVAL_EVERY,                                  # [002] inert under "epoch" strategy
+        save_strategy="epoch",                                  # [002] was "steps" — save at end of each epoch
+        save_steps=EVAL_EVERY,                                  # [002] inert under "epoch" strategy
         metric_for_best_model="eval_em_accuracy",               # Metric to use for determining the best model
         greater_is_better=True,                                 # Higher classification_accuracy is better
-        save_total_limit=1,                                     # Maximum number of checkpoints to store
+        save_total_limit=None,                                  # [002] was 1 — keep all per-epoch ckpts (~25 MB each × 10 ≈ 250 MB)
         load_best_model_at_end=True,                            # Load the best model at the end of training
 
         # WandB logging:
