@@ -29,9 +29,19 @@ from datasets import load_dataset
 
 from ...utils import TextGraphDataset
 
-# Canonical HF Hub path for WTQ. If this fails the agent should record the
-# resolved alternative in decisions.md per the runbook §4 task 6.
-WTQ_HF_PATH = "Stanford/wikitablequestions"
+# HF Hub path for WTQ. The historical "Stanford/wikitablequestions" is a
+# script-based loader, which HF datasets no longer supports — load_dataset
+# raises "Dataset scripts are no longer supported". Resolved alternative:
+# lighteval/wikitablequestions ships pre-converted parquet with the right
+# schema (question/answers/table.{header,rows}/table_md). One quirk: it
+# merges the original train + test into a single "test" split (18486 rows),
+# distinguishable by id prefix:
+#   nt-*  → 14142 training-pool rows  (original train.tsv)
+#   nu-*  → 4344  test rows           (original pristine-unseen-tables)
+# We further carve ~17% of the nt-* pool into a validation split, matching
+# the original train/dev ratio (~14149 train + ~2831 dev = 17% dev).
+WTQ_HF_PATH = "lighteval/wikitablequestions"
+WTQ_VAL_FRACTION = 0.17  # of the nt-* pool; deterministic via seed shuffle
 
 
 def _normalize_answer_list(answers) -> str:
@@ -126,18 +136,30 @@ def load_data(
     rng = random.Random(seed)
     ds_raw = load_dataset(WTQ_HF_PATH)
 
-    splits = {
-        'train':      ('train',      max_train),
-        'validation': ('validation', max_val),
-        'test':       ('test',       max_test),
+    # lighteval/wikitablequestions merges train+test into one "test" split
+    # (18486 rows). Re-split by id prefix (nt-* = train pool, nu-* = test
+    # pool), then carve a deterministic ~17% val out of the train pool.
+    pool = list(ds_raw['test'])
+    nt_pool = [ex for ex in pool if ex['id'].startswith('nt-')]
+    nu_pool = [ex for ex in pool if ex['id'].startswith('nu-')]
+    rng.shuffle(nt_pool)  # before val carve so the carve is deterministic-by-seed
+    n_val = int(len(nt_pool) * WTQ_VAL_FRACTION)
+    val_pool = nt_pool[:n_val]
+    train_pool = nt_pool[n_val:]
+    test_pool = nu_pool
+
+    pools = {
+        'train':      (train_pool, max_train),
+        'validation': (val_pool,   max_val),
+        'test':       (test_pool,  max_test),
     }
     built: dict[str, TextGraphDataset] = {}
     skip_counts: dict[str, int] = {}
 
-    for split_key, (hf_split, cap) in splits.items():
+    for split_key, (examples, cap) in pools.items():
         graphs: list[nx.DiGraph] = []
         skipped = 0
-        for ex in ds_raw[hf_split]:
+        for ex in examples:
             question = ex['question']
             answers  = ex['answers']
             table    = ex['table']
