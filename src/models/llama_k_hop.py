@@ -164,6 +164,11 @@ class LlamaAttentionWithKHop(LlamaAttention):
             rwse       = input_graph_batch.get('rwse')                   if (input_graph_batch and gb.require_rwse)      else None,
             rrwp       = input_graph_batch.get('rrwp')                   if (input_graph_batch and gb.require_rrwp)      else None,
             magnetic   = input_graph_batch.get('magnetic')               if (input_graph_batch and gb.require_magnetic)  else None,
+            # Table-structural biases (exp 003)
+            header_node_id_per_cell = input_graph_batch.get('header_node_id_per_cell') if (input_graph_batch and gb.require_col_header)       else None,
+            row_anchor_id_per_cell  = input_graph_batch.get('row_anchor_id_per_cell')  if (input_graph_batch and gb.require_row_anchor_agg)   else None,
+            is_header               = input_graph_batch.get('is_header')               if (input_graph_batch and gb.require_header_clique)    else None,
+            is_row_anchor           = input_graph_batch.get('is_row_anchor')           if (input_graph_batch and gb.require_row_anchor_spine) else None,
             k_hop_mask = input_graph_batch.get('k_hop_mask')             if (input_graph_batch and gb.k_hop > 0)         else None,
             cache_dict = input_graph_batch,
         )

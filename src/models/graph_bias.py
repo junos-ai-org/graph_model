@@ -177,6 +177,140 @@ class MagneticBias(BaseBias):
         return b.masked_fill(diag.unsqueeze(0).unsqueeze(0), 0.0)
 
 
+# ── Table-structural biases (exp 003) ─────────────────────────────────────────
+#
+# Four symmetric, one-scalar-per-head biases for tabular reasoning. See
+# docs/reproduction_plan_003.md (graph-reasoning-llm research repo) for the
+# (N,N) matrix picture and the design rationale.
+#
+# Inputs expected on the batch dict (provided by TextGraphDataset.compute_table_metadata
+# + GraphCollator padding):
+#   header_node_id_per_cell : (B, N) long, the col-header node id for each cell
+#                              (-1 for header-row cells themselves or padding)
+#   row_anchor_id_per_cell  : (B, N) long, the row-anchor node id for each cell
+#                              (anchor cells point to themselves; -1 for header-row / padding)
+#   is_header               : (B, N) bool, true for header-row cells
+#   is_row_anchor           : (B, N) bool, true for first cell of each data row
+#
+# All four biases follow the same pattern: build an (B, N, N) bool mask from
+# the metadata, AND-out the diagonal, multiply by a per-head learnable scalar.
+
+def _zero_diag(M: torch.Tensor, N: int, device: torch.device) -> torch.Tensor:
+    """AND-out the diagonal of an (B, N, N) bool mask."""
+    eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
+    return M & ~eye
+
+
+class ColumnHeaderBias(BaseBias):
+    """α: cell ↔ its column header (symmetric, one learnable scalar per head)."""
+
+    config_key = 'col_header'
+
+    def __init__(self, num_heads: int, head_dim: int, bias_config):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.zeros(num_heads))
+
+    def forward(
+        self, *, dtype, device,
+        header_node_id_per_cell: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
+        if header_node_id_per_cell is None:
+            return None
+        B, N = header_node_id_per_cell.shape
+        H = self.alpha.shape[0]
+        j_idx = torch.arange(N, device=device).view(1, 1, N).expand(B, N, N)
+        header_i = header_node_id_per_cell.unsqueeze(2).expand(B, N, N)
+        # M[b,i,j] = "j is i's column header"
+        M = (header_i == j_idx) & (header_i >= 0)
+        # Symmetric: also include "i is j's column header"
+        M = _zero_diag(M | M.transpose(1, 2), N, device)
+        alpha = self.alpha.to(dtype=dtype, device=device).view(1, H, 1, 1)
+        return M.unsqueeze(1).to(dtype) * alpha                       # (B, H, N, N)
+
+
+class HeaderCliqueBias(BaseBias):
+    """ε: column header ↔ column header (clique, symmetric, one scalar per head)."""
+
+    config_key = 'header_clique'
+
+    def __init__(self, num_heads: int, head_dim: int, bias_config):
+        super().__init__()
+        self.epsilon = nn.Parameter(torch.zeros(num_heads))
+
+    def forward(
+        self, *, dtype, device,
+        is_header: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
+        if is_header is None:
+            return None
+        B, N = is_header.shape
+        H = self.epsilon.shape[0]
+        # M[b,i,j] = is_header[i] AND is_header[j]
+        M = is_header.unsqueeze(2) & is_header.unsqueeze(1)
+        M = _zero_diag(M, N, device)
+        eps = self.epsilon.to(dtype=dtype, device=device).view(1, H, 1, 1)
+        return M.unsqueeze(1).to(dtype) * eps
+
+
+class RowAnchorAggBias(BaseBias):
+    """γ: row anchor ↔ every cell in its row (symmetric, one scalar per head).
+
+    Convention: row_anchor_id_per_cell[anchor] = anchor's own id (anchors point
+    to themselves). -1 for header-row cells and padding.
+    """
+
+    config_key = 'row_anchor_agg'
+
+    def __init__(self, num_heads: int, head_dim: int, bias_config):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(num_heads))
+
+    def forward(
+        self, *, dtype, device,
+        row_anchor_id_per_cell: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
+        if row_anchor_id_per_cell is None:
+            return None
+        B, N = row_anchor_id_per_cell.shape
+        H = self.gamma.shape[0]
+        j_idx = torch.arange(N, device=device).view(1, 1, N).expand(B, N, N)
+        anchor_i = row_anchor_id_per_cell.unsqueeze(2).expand(B, N, N)
+        # M[b,i,j] = "j is i's row anchor"
+        M = (anchor_i == j_idx) & (anchor_i >= 0)
+        # Symmetric: also "i is j's row anchor"
+        M = _zero_diag(M | M.transpose(1, 2), N, device)
+        gamma = self.gamma.to(dtype=dtype, device=device).view(1, H, 1, 1)
+        return M.unsqueeze(1).to(dtype) * gamma
+
+
+class RowAnchorSpineBias(BaseBias):
+    """δ: row anchor ↔ row anchor (clique, symmetric, one scalar per head)."""
+
+    config_key = 'row_anchor_spine'
+
+    def __init__(self, num_heads: int, head_dim: int, bias_config):
+        super().__init__()
+        self.delta = nn.Parameter(torch.zeros(num_heads))
+
+    def forward(
+        self, *, dtype, device,
+        is_row_anchor: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
+        if is_row_anchor is None:
+            return None
+        B, N = is_row_anchor.shape
+        H = self.delta.shape[0]
+        # M[b,i,j] = is_row_anchor[i] AND is_row_anchor[j]
+        M = is_row_anchor.unsqueeze(2) & is_row_anchor.unsqueeze(1)
+        M = _zero_diag(M, N, device)
+        delta = self.delta.to(dtype=dtype, device=device).view(1, H, 1, 1)
+        return M.unsqueeze(1).to(dtype) * delta
+
+
 # ── Registration list ─────────────────────────────────────────────────────────
 
 BIAS_TYPES: list[type[BaseBias]] = [
@@ -185,6 +319,10 @@ BIAS_TYPES: list[type[BaseBias]] = [
     RWSEBias,
     RRWPBias,
     MagneticBias,
+    ColumnHeaderBias,
+    HeaderCliqueBias,
+    RowAnchorAggBias,
+    RowAnchorSpineBias,
 ]
 """Add new bias types here — GraphAttentionBias picks them up automatically."""
 
@@ -240,6 +378,24 @@ class GraphAttentionBias(nn.Module):
     @property
     def require_magnetic(self) -> bool:  return 'magnetic'  in self._active
 
+    @property
+    def require_col_header(self) -> bool:       return 'col_header'       in self._active
+
+    @property
+    def require_header_clique(self) -> bool:    return 'header_clique'    in self._active
+
+    @property
+    def require_row_anchor_agg(self) -> bool:   return 'row_anchor_agg'   in self._active
+
+    @property
+    def require_row_anchor_spine(self) -> bool: return 'row_anchor_spine' in self._active
+
+    @property
+    def require_table_metadata(self) -> bool:
+        """True if any table-structural bias is enabled."""
+        return any(self._active & {'col_header', 'header_clique',
+                                    'row_anchor_agg', 'row_anchor_spine'})
+
     # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(
@@ -252,6 +408,10 @@ class GraphAttentionBias(nn.Module):
         rwse:        Optional[torch.Tensor]                           = None,
         rrwp:        Optional[torch.Tensor]                           = None,
         magnetic:    Optional[Tuple[torch.Tensor, torch.Tensor]]      = None,
+        header_node_id_per_cell: Optional[torch.Tensor]               = None,
+        row_anchor_id_per_cell:  Optional[torch.Tensor]               = None,
+        is_header:               Optional[torch.Tensor]               = None,
+        is_row_anchor:           Optional[torch.Tensor]               = None,
         k_hop_mask:  Optional[torch.Tensor]                           = None,
         cache_dict:  Optional[dict]                                   = None,
     ) -> Optional[torch.Tensor]:
@@ -274,6 +434,10 @@ class GraphAttentionBias(nn.Module):
                 dtype=dtype, device=device,
                 num_nodes=num_nodes, spd=spd, laplacian=laplacian,
                 rwse=rwse, rrwp=rrwp, magnetic=magnetic,
+                header_node_id_per_cell=header_node_id_per_cell,
+                row_anchor_id_per_cell=row_anchor_id_per_cell,
+                is_header=is_header,
+                is_row_anchor=is_row_anchor,
             )
             if b is not None:
                 node_bias = b if node_bias is None else node_bias + b

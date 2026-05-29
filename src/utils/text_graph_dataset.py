@@ -180,6 +180,18 @@ class TextGraphDataset(Dataset):
         if 'labels' in item and item['labels'] is not None:
             item['labels'] = torch.tensor(item['labels'], dtype=torch.long)
 
+        # Handle Table Metadata (exp 003): convert lists back to tensors.
+        for _col, _dtype in [
+            ('column_id',                torch.long),
+            ('row_id',                   torch.long),
+            ('header_node_id_per_cell',  torch.long),
+            ('row_anchor_id_per_cell',   torch.long),
+            ('is_header',                torch.bool),
+            ('is_row_anchor',            torch.bool),
+        ]:
+            if _col in item and item[_col] is not None:
+                item[_col] = torch.tensor(item[_col], dtype=_dtype)
+
         return item
 
     def select(self, indices: List[int]) -> 'TextGraphDataset':
@@ -480,6 +492,79 @@ class TextGraphDataset(Dataset):
             batch_size=1, 
             desc=f"GPU Magnetic Spectral Decomposition (q={q})"
         )
+
+    def compute_table_metadata(self):
+        """
+        Compute per-cell table metadata for the exp-003 structural biases.
+
+        Assumes each NetworkX graph in self.graphs has these node attributes:
+          - column_id   : int (which column the cell is in; 0 = leftmost)
+          - row_id      : int (which row; 0 = header row)
+          - is_header   : bool (cell is in the header row)
+
+        Derives and writes six Arrow columns:
+          - 'column_id'                 : list[int]    shape (N,)
+          - 'row_id'                    : list[int]    shape (N,)
+          - 'is_header'                 : list[bool]   shape (N,)
+          - 'is_row_anchor'             : list[bool]   shape (N,) (True for col 0 of any data row)
+          - 'header_node_id_per_cell'   : list[int]    shape (N,) (-1 for header cells)
+          - 'row_anchor_id_per_cell'    : list[int]    shape (N,) (-1 for header cells;
+                                                       row-anchor cells point to themselves)
+
+        These are consumed by ColumnHeaderBias, HeaderCliqueBias, RowAnchorAggBias,
+        and RowAnchorSpineBias (see src/models/graph_bias.py).
+        """
+        column_id_list             = []
+        row_id_list                = []
+        is_header_list             = []
+        is_row_anchor_list         = []
+        header_node_id_list        = []
+        row_anchor_id_list         = []
+
+        for g in tqdm(self.graphs, desc="Computing table metadata"):
+            n = g.number_of_nodes()
+            col_ids   = [int(g.nodes[i]['column_id'])  for i in range(n)]
+            row_ids   = [int(g.nodes[i]['row_id'])     for i in range(n)]
+            is_hdr    = [bool(g.nodes[i]['is_header']) for i in range(n)]
+            # Row anchor = first cell (column 0) of a non-header row.
+            is_anchor = [(col_ids[i] == 0) and (not is_hdr[i]) for i in range(n)]
+
+            # Build column_id → header_node_id lookup (only header cells contribute).
+            col_to_header: dict[int, int] = {
+                col_ids[i]: i for i in range(n) if is_hdr[i]
+            }
+            # Build row_id → anchor_node_id lookup (only anchors contribute).
+            row_to_anchor: dict[int, int] = {
+                row_ids[i]: i for i in range(n) if is_anchor[i]
+            }
+
+            header_per_cell = [
+                -1 if is_hdr[i] else col_to_header.get(col_ids[i], -1)
+                for i in range(n)
+            ]
+            anchor_per_cell = [
+                -1 if is_hdr[i] else row_to_anchor.get(row_ids[i], -1)
+                for i in range(n)
+            ]
+
+            column_id_list.append(col_ids)
+            row_id_list.append(row_ids)
+            is_header_list.append(is_hdr)
+            is_row_anchor_list.append(is_anchor)
+            header_node_id_list.append(header_per_cell)
+            row_anchor_id_list.append(anchor_per_cell)
+
+        for col_name, col_values in [
+            ('column_id',                column_id_list),
+            ('row_id',                   row_id_list),
+            ('is_header',                is_header_list),
+            ('is_row_anchor',            is_row_anchor_list),
+            ('header_node_id_per_cell',  header_node_id_list),
+            ('row_anchor_id_per_cell',   row_anchor_id_list),
+        ]:
+            if col_name in self._hf_dataset.column_names:
+                self._hf_dataset = self._hf_dataset.remove_columns(col_name)
+            self._hf_dataset = self._hf_dataset.add_column(col_name, col_values)
 
     def compute_labels(self, get_graph_labels, num_proc=None):
         """

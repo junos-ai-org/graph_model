@@ -85,6 +85,15 @@ class GraphCollator:
         magnetic_V = torch.zeros(batch_size, max_num_nodes, max_m, 2, dtype=torch.float)
         magnetic_lambdas = torch.zeros(batch_size, max_m, dtype=torch.float)
 
+        # initialise table metadata (exp 003). Sentinel -1 / False for padding
+        # so the bias modules correctly mask out invalid positions.
+        has_table_meta = 'header_node_id_per_cell' in batch[0]
+        if has_table_meta:
+            header_node_id_per_cell = torch.full((batch_size, max_num_nodes), -1, dtype=torch.long)
+            row_anchor_id_per_cell  = torch.full((batch_size, max_num_nodes), -1, dtype=torch.long)
+            is_header               = torch.zeros((batch_size, max_num_nodes), dtype=torch.bool)
+            is_row_anchor           = torch.zeros((batch_size, max_num_nodes), dtype=torch.bool)
+
         for i, item in enumerate(batch):
             num_nodes = item['num_nodes']
             if "laplacian_coordinates" in item:
@@ -101,6 +110,11 @@ class GraphCollator:
                     m_eff = min(m_eff, self.magnetic_m)
                 magnetic_V[i, :num_nodes, :m_eff, :] = item['magnetic_V'][:, :m_eff, :].detach().clone()
                 magnetic_lambdas[i, :m_eff] = item['magnetic_lambdas'][:m_eff].detach().clone()
+            if has_table_meta:
+                header_node_id_per_cell[i, :num_nodes] = item['header_node_id_per_cell'].detach().clone()
+                row_anchor_id_per_cell[i, :num_nodes]  = item['row_anchor_id_per_cell'].detach().clone()
+                is_header[i, :num_nodes]               = item['is_header'].detach().clone()
+                is_row_anchor[i, :num_nodes]           = item['is_row_anchor'].detach().clone()
 
         batch_dict = {
             'num_nodes': sizes,
@@ -114,6 +128,12 @@ class GraphCollator:
             'rrwp': rrwp,
             'magnetic': (magnetic_V, magnetic_lambdas) if torch.any(magnetic_V) or torch.any(magnetic_lambdas) else None,
         }
+
+        if has_table_meta:
+            batch_dict['header_node_id_per_cell'] = header_node_id_per_cell
+            batch_dict['row_anchor_id_per_cell']  = row_anchor_id_per_cell
+            batch_dict['is_header']               = is_header
+            batch_dict['is_row_anchor']           = is_row_anchor
 
         if self.k_hop > 0:
             batch_dict['k_hop_mask'] = self._build_k_hop_masks(batch, max_num_nodes)
