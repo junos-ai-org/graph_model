@@ -64,11 +64,35 @@ def _normalize_cell(s: str) -> str:
     return s
 
 
+_ANSWER_MARKER_RE = re.compile(r'(?i)answer\s*:\s*')
+
+
 def _parse_predicted(text: str) -> List[str]:
-    """Parse the model's generated answer string into a list of normalized cells."""
-    # Stop at the first newline (model sometimes echoes more "Question: ..."'s)
-    text = text.split('\n')[0]
-    parts = re.split(r'[,;]', text)
+    """Parse the model's generated answer string into a list of normalized cells.
+
+    Under greedy generation with `max_new_tokens=128`, the trained model
+    frequently emits a long suffix that re-echoes table content and the
+    question before producing its actual answer (a learned pattern from
+    the training format "Question: q Answer: gold"). So we:
+      1. Find the LAST 'Answer:' marker in the generated text.
+      2. Take what follows it, up to the next newline.
+      3. Split on comma / semicolon, normalize each cell.
+
+    Fallback: if no 'Answer:' marker is found, treat the first line of
+    the suffix as the answer (matches the simpler eval the parser was
+    originally written for; rare in practice).
+    """
+    matches = list(_ANSWER_MARKER_RE.finditer(text))
+    if matches:
+        last = matches[-1]
+        tail = text[last.end():]
+    else:
+        tail = text
+    # Stop at the first newline OR an echoed "Question:" — the model often
+    # tries to continue with another question after its answer.
+    tail = tail.split('\n')[0]
+    tail = re.split(r'(?i)\bquestion\s*:', tail)[0]
+    parts = re.split(r'[,;]', tail)
     return [_normalize_cell(p) for p in parts if _normalize_cell(p)]
 
 
