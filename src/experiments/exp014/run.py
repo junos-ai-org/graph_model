@@ -98,7 +98,8 @@ def make_item(g, node_input_ids, labels, feats) -> dict:
 def stage_prep(args, tokenizer):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    cache = out / "train_items.pt"
+    suffix = f"_n{args.max_examples}" if args.max_examples > 0 else ""
+    cache = out / f"train_items{suffix}.pt"
     if cache.exists() and not args.force:
         print(f"prep: {cache} exists, skipping (use --force to rebuild)")
         return
@@ -211,9 +212,8 @@ def stage_train(args, tokenizer):
     require_wandb()
     os.environ.setdefault("WANDB_PROJECT", "graph-reasoning-llm")
     out = Path(args.out)
-    items = torch.load(out / "train_items.pt", weights_only=False)
-    if args.max_examples > 0:
-        items = items[: args.max_examples]
+    suffix = f"_n{args.max_examples}" if args.max_examples > 0 else ""
+    items = torch.load(out / f"train_items{suffix}.pt", weights_only=False)
     train_ds = GraphItemDataset(items)
     print(f"training on {len(train_ds)} examples")
 
@@ -296,7 +296,11 @@ def stage_eval(args, tokenizer):
                 batch = collator([make_item(g, node_ids, None, feats)])
                 batch.pop("labels", None)
                 prep_len = sum(len(x) for x in node_ids)
-                with torch.no_grad():
+                # Training ran under Trainer's bf16 autocast; mirror it here so
+                # fp32 feature tensors meet the bf16 bias-MLP weights cleanly.
+                with torch.no_grad(), torch.autocast(
+                        device_type=device.type, dtype=torch.bfloat16,
+                        enabled=device.type == "cuda"):
                     gen = model.generate(input_graph_batch=batch,
                                          max_new_tokens=MAX_NEW_TOKENS,
                                          do_sample=False,
