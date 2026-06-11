@@ -28,7 +28,12 @@ QUESTION_TEMPLATE = "\n\nQuestion: {q}\nAnswer:"
 
 
 def build_table_graph(header: list[str], rows: list[list[str]]) -> nx.DiGraph:
-    """Build the directed table graph (WITHOUT the prompt node)."""
+    """Build the directed table graph (WITHOUT the prompt node).
+
+    Ragged rows: short rows are padded with empty-text cells; cells BEYOND the
+    header width are dropped — the same behavior as the dlm `plain` builder
+    exp013 trained on (`rows[r][c] if c < len(rows[r]) else ""` over
+    range(n_cols)), kept deliberately for comparability."""
     n_cols = len(header)
     g = nx.DiGraph()
     for c in range(n_cols):

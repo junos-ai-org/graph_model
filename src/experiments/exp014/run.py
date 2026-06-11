@@ -143,7 +143,12 @@ class Exp014Model(KHopGraphLlamaForCausalLM):
     """Fixes generation position_ids: upstream prepare_inputs_for_generation
     slices a static position_ids tensor, so every generated token reuses the
     last prompt position. Extend positions monotonically instead (continuing
-    the prompt node's RoPE positions)."""
+    the prompt node's RoPE positions).
+
+    NOTE the guard is conditional on input_ids outgrowing position_ids: on
+    transformers==4.50.3 (the pod pin) HF never extends position_ids, so this
+    branch fires every step; on >=4.52 HF extends them itself and this branch
+    is correctly inert. Do not remove the guard."""
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
                                       attention_mask=None, inputs_embeds=None,
@@ -265,26 +270,44 @@ def stage_eval(args, tokenizer):
     out_dir.mkdir(parents=True, exist_ok=True)
     rec_path = out_dir / "records.jsonl"
 
-    n, correct, skipped = 0, 0, []
-    with rec_path.open("w") as rec_f:
+    # Resume support: a pod kill must not lose finished generations. Records
+    # are appended and flushed per example; already-scored ids are skipped.
+    done: dict[str, bool] = {}
+    if rec_path.exists():
+        for line in rec_path.read_text().splitlines():
+            r = json.loads(line)
+            done[r["id"]] = bool(r["correct"])
+        print(f"resuming: {len(done)} examples already scored in {rec_path}")
+
+    n, correct, skipped, failed = len(done), sum(done.values()), [], []
+    with rec_path.open("a") as rec_f:
         for i, ex in enumerate(ds.test(apply_max_cells=False)):
             if args.eval_max > 0 and n >= args.eval_max:
                 break
-            g, node_ids, _ = build_example(tokenizer, ex, with_answer=False)
-            if total_tokens(node_ids) > EVAL_MAX_TOKENS or \
-                    g.number_of_nodes() > EVAL_MAX_NODES:
-                skipped.append(ex["id"])
+            if ex["id"] in done:
                 continue
-            feats = compute_features_chunk([g], device)[0]
-            batch = collator([make_item(g, node_ids, None, feats)])
-            batch.pop("labels", None)
-            prep_len = max(sum(len(x) for x in node_ids), 1)
-            with torch.no_grad():
-                gen = model.generate(input_graph_batch=batch,
-                                     max_new_tokens=MAX_NEW_TOKENS,
-                                     do_sample=False,
-                                     pad_token_id=tokenizer.eos_token_id)
-            pred = tokenizer.decode(gen[0][prep_len:], skip_special_tokens=True).strip()
+            try:
+                g, node_ids, _ = build_example(tokenizer, ex, with_answer=False)
+                if total_tokens(node_ids) > EVAL_MAX_TOKENS or \
+                        g.number_of_nodes() > EVAL_MAX_NODES:
+                    skipped.append(ex["id"])
+                    continue
+                feats = compute_features_chunk([g], device)[0]
+                batch = collator([make_item(g, node_ids, None, feats)])
+                batch.pop("labels", None)
+                prep_len = sum(len(x) for x in node_ids)
+                with torch.no_grad():
+                    gen = model.generate(input_graph_batch=batch,
+                                         max_new_tokens=MAX_NEW_TOKENS,
+                                         do_sample=False,
+                                         pad_token_id=tokenizer.eos_token_id)
+                pred = tokenizer.decode(gen[0][prep_len:],
+                                        skip_special_tokens=True).strip()
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                failed.append({"id": ex["id"], "error": "cuda OOM"})
+                print(f"[gtlm-graph] OOM on id={ex['id']} — skipped", flush=True)
+                continue
             ok = denotation_match(pred, [ex["answer"]])
             correct += int(ok)
             n += 1
@@ -308,7 +331,8 @@ def stage_eval(args, tokenizer):
     results = {
         "variant": "gtlm-graph", "checkpoint": args.checkpoint,
         "n": n, "accuracy": acc, "n_skipped_over_len": len(skipped),
-        "skipped_ids": skipped, "max_new_tokens": MAX_NEW_TOKENS,
+        "skipped_ids": skipped, "failed": failed,
+        "max_new_tokens": MAX_NEW_TOKENS,
         "eval_max_tokens": EVAL_MAX_TOKENS, "bias_kw": BIAS_KW,
         "per_category": {k: {"correct": c, "n": t, "accuracy": c / t}
                          for k, (c, t) in sorted(per.items())},

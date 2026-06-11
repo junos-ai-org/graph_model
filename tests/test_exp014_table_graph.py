@@ -57,6 +57,21 @@ def test_ragged_row_padded_with_empty_cell():
     assert (3, 1) in g.edges() and (3, 2) in g.edges()
 
 
+def test_ragged_long_row_overflow_cells_dropped_dlm_parity():
+    """Cells beyond the header width are dropped — pinned to match the dlm
+    `plain` builder exp013 trained on (comparability contract)."""
+    g = build_table_graph(["a", "b"], [["x", "y", "z"]])
+    assert g.number_of_nodes() == 4          # 2 columns + 2 cells, no "z" node
+    texts = {g.nodes[i]["text"] for i in g.nodes}
+    assert "z" not in texts
+
+
+def test_single_column_table_has_no_left_edges():
+    g = build_table_graph(["only"], [["1"], ["2"]])
+    # nodes: 0=column, 1,2 = cells; edges only cell->column
+    assert set(g.edges()) == {(1, 0), (2, 0)}
+
+
 def test_prompt_node_is_last_and_isolated():
     g = add_prompt_node(build_table_graph(HEADER, ROWS), "who?")
     p = g.graph["prompt_node"]
@@ -96,6 +111,13 @@ def test_prompt_labels_mask_question_supervise_answer_eos():
     assert labels[:len(prefix)] == [-100] * len(prefix)
     assert labels[len(prefix):] == ans + [tok.eos_token_id]
     assert len(ids) == len(labels)
+
+
+def test_prompt_labels_with_empty_answer_still_supervise_eos():
+    tok = FakeTokenizer()
+    ids, labels = prompt_ids_and_labels(tok, "q", "", tok.eos_token_id)
+    supervised = [l for l in labels if l != -100]
+    assert supervised and supervised[-1] == tok.eos_token_id
 
 
 def test_prompt_prefix_stability():
