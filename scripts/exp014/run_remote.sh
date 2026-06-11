@@ -41,7 +41,7 @@ echo "[exp014] graph_model at $(git rev-parse --short HEAD) (ref=${CODE_REF})"
 
 # ---- 2. Deps (same core pins as exp013 + networkx for the graph build) ----
 pip install -q transformers==4.50.3 peft==0.18.1 datasets==4.8.4 accelerate==1.13.0 \
-    'huggingface-hub[cli]==0.27.1' 'hf_transfer>=0.1.0' 'wandb==0.18.7' networkx
+    'huggingface-hub[cli]==0.27.1' 'hf_transfer>=0.1.0' 'wandb==0.18.7' networkx scipy
 
 # ---- 3. Hydrate base model ----
 python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; \
